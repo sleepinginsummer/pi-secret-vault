@@ -15,6 +15,7 @@ import {
 import { bashIsOwnedByPiSecret, registerSecureBash } from "./tools/bash.ts";
 import { createSecListTool } from "./tools/sec-list.ts";
 import { createSecRequestTool } from "./tools/sec-request.ts";
+import { createSecRemarkTool } from "./tools/sec-remark.ts";
 import { bashRedirectWarning } from "./redirect.ts";
 import { createSecAutocompleteProvider } from "./autocomplete.ts";
 import { RECEIPT_TYPE, buildReceiptComponent, type Receipt, type ReceiptItem } from "./receipt.ts";
@@ -238,6 +239,7 @@ export default function piSecret(pi: ExtensionAPI): void {
     registerSecureBash(pi, ctx.cwd, { vault: () => vault(ctx) });
     pi.registerTool(createSecListTool(() => vault(ctx)));
     pi.registerTool(createSecRequestTool(() => vault(ctx)));
+    pi.registerTool(createSecRemarkTool(() => vault(ctx)));
     // spec §5's discovery surface: `{{sec:` completes from the vault. It lives on the UI
     // context, not the ExtensionAPI, so it is registered here rather than at load. The
     // provider itself handles being asked before a vault exists (activeVault throws, and

@@ -190,6 +190,8 @@ function literalSecretNames(vault: Vault, input: Record<string, unknown>): strin
   return names;
 }
 
+const NO_REF_TOOLS: ReadonlySet<string> = new Set(["sec_remark", "sec_request"]);
+
 export function injectToolCall(
   toolName: string,
   input: Record<string, unknown>,
@@ -203,6 +205,19 @@ export function injectToolCall(
         reason: BLOCKED_IN_CONTENT.has(toolName)
           ? `${FILE_WRITE_REASON} A vaulted value (sec:${literals.join(", ")}) was also passed literally.`
           : `sec:${literals.join(", ")} was passed as a literal value. Reference it as {{sec:${literals[0]}}} instead — pi-secret substitutes it at execution time, so the value never enters the command, the transcript, or the session file.`,
+      },
+      expanded: [],
+      env: {},
+    };
+  }
+  // Every other tool gets refs expanded in its arguments below. Here that would store the real
+  // value as plaintext metadata, or show it in a prompt, so these arguments never expand.
+  if (NO_REF_TOOLS.has(toolName) && findRefs(JSON.stringify(input) ?? "").length) {
+    return {
+      blocked: {
+        reason:
+          `sec: refs are not valid in ${toolName} arguments: a remark or reason is plain text that describes a credential. ` +
+          "Pass the NAME on its own and describe what the credential is for.",
       },
       expanded: [],
       env: {},

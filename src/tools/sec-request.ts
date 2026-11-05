@@ -3,6 +3,7 @@ import { Type } from "typebox";
 import { isValidName } from "../refs.ts";
 import { promptMaskedSecret } from "../masked-input.ts";
 import { saveSecret } from "../persist.ts";
+import { REMARK_GUIDE, validateRemark } from "../remark.ts";
 import type { Vault } from "../vault.ts";
 
 /** 与 /sec add 的单值上限保持同一量级：超过这个长度几乎不可能是凭证。 */
@@ -28,7 +29,7 @@ export function createSecRequestTool(getVault: () => Vault): ToolDefinition {
       "Ask the user to enter a credential that is missing for the current task. The value goes straight into this session's vault and is never returned to you: you only learn whether it was provided, and then use it as {{sec:NAME}}.",
     promptSnippet: "Ask the user for a missing credential (masked input; you never see the value)",
     promptGuidelines: [
-      "Call sec_request when a task needs a credential that sec_list does not list. Never ask the user to paste a secret into the conversation, and never guess, generate or request one another way.",
+      "Call sec_request only when no name or remark in sec_list fits the task, and pass a remark. Never ask the user to paste a secret into the conversation, and never guess, generate or request one another way.",
       "A sec_request result tells you only provided / cancelled / reused. Do not ask the user what they typed, and do not try to read it back: use {{sec:NAME}} where the credential is needed.",
     ],
     parameters: Type.Object({
@@ -37,6 +38,9 @@ export function createSecRequestTool(getVault: () => Vault): ToolDefinition {
       }),
       reason: Type.Optional(
         Type.String({ description: "One short sentence telling the user what the credential is for. Shown in the prompt." }),
+      ),
+      remark: Type.Optional(
+        Type.String({ description: `Saved with the credential so later sessions can reuse it. ${REMARK_GUIDE}` }),
       ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -59,10 +63,19 @@ export function createSecRequestTool(getVault: () => Vault): ToolDefinition {
           content: [
             {
               type: "text" as const,
-              text: `reused: ${name} is already in the vault. Reference it as {{sec:${name}}}.`,
+              text: `reused: ${name} is already in the vault. Reference it as {{sec:${name}}}. Its remark was not changed; use sec_remark to change it.`,
             },
           ],
           details: { name, ok: true, reused: true },
+        };
+      }
+
+      // Before the prompt: a bad remark must not cost the user a value they already typed.
+      const checkedRemark = validateRemark(String((params as { remark?: unknown }).remark ?? ""), vault);
+      if (!checkedRemark.ok) {
+        return {
+          content: [{ type: "text" as const, text: `sec_request failed: ${checkedRemark.reason}` }],
+          details: { name, ok: false, error: "invalid-remark" },
         };
       }
 
@@ -109,7 +122,7 @@ export function createSecRequestTool(getVault: () => Vault): ToolDefinition {
       }
 
       // 注意：这里不 trim 值本身——凭证可能以后导空格结尾。
-      const saved = saveSecret(vault, name, entered, "prompt");
+      const saved = saveSecret(vault, name, entered, "prompt", undefined, checkedRemark.remark);
       return {
         content: [
           {

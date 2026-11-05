@@ -5,7 +5,7 @@ import { basename } from "node:path";
 import { activeVault, dropActiveVault, type Vault } from "./vault.ts";
 import { isValidName } from "./refs.ts";
 import { promptMaskedSecret } from "./masked-input.ts";
-import { forgetStored, renameStored, saveSecret, syncVault } from "./persist.ts";
+import { applyRemark, forgetStored, renameStored, saveSecret, syncVault } from "./persist.ts";
 import { setEnabled } from "./state.ts";
 import { secretLabel } from "./preview.ts";
 import { canShowMenu, entryRows, secretRows, selectList, statusLine } from "./menu.ts";
@@ -19,14 +19,14 @@ import { isLikelySecret } from "./entropy.ts";
 const labelOf = (e: PublicEntry): string => e.preview ?? `sha256:${e.fingerprint}`;
 
 const SEC_USAGE =
-  "usage: /sec [add <name> | add-from-file [path] | list | save <name> | remove <name> | rename <old> <new> | restore <name> | off | on]";
+  "usage: /sec [add <name> | add-from-file [path] | list | save <name> | remove <name> | rename <old> <new> | remark <name> [text] | restore <name> | off | on]";
 
 // Argument form. The MENU is the primary surface — `/sec` with no arguments opens it — and
 // this list exists as the escape hatch for scripting, for headless sessions where there is no
 // menu to draw, and for the completion provider. `test` used to be here; it printed one entry
 // with a timestamp, which is now a column in the list, so it was redundant and confusingly
 // named (it never contacted any provider, so "test" invited an expectation it never met).
-const VERBS = ["add ", "add-from-file ", "list", "save ", "remove ", "rename ", "restore ", "off", "on"];
+const VERBS = ["add ", "add-from-file ", "list", "save ", "remove ", "rename ", "remark ", "restore ", "off", "on"];
 
 /**
  * One dispatcher rather than eight commands: pi's `registerCommand` takes a bare
@@ -35,7 +35,7 @@ const VERBS = ["add ", "add-from-file ", "list", "save ", "remove ", "rename ", 
  */
 export function registerCommands(pi: ExtensionAPI): void {
   pi.registerCommand("sec", {
-    description: "This session's secrets — opens a menu; or add | list | remove | rename | restore | off | on",
+    description: "This session's secrets — opens a menu; or add | list | remove | rename | remark | restore | off | on",
     getArgumentCompletions: (prefix: string) => {
       const trimmed = prefix.trim();
       const items = VERBS.map((v) => ({ value: v, label: `/sec ${v.trim()}` })).filter(
@@ -136,7 +136,7 @@ export async function runSecCommand(
         return;
       }
       vault.remove(arg);
-      const saved = saveSecret(vault, arg, current.value, current.source);
+      const saved = saveSecret(vault, arg, current.value, current.source, undefined, current.remark);
       ctx.ui.notify(`sec:${arg} — ${saved.note}`, saved.persisted ? "info" : "warning");
       return;
     }
@@ -176,6 +176,17 @@ export async function runSecCommand(
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
       }
+      return;
+    }
+
+    case "remark": {
+      const name = (rest[0] ?? "").replace(/^sec:/, "");
+      const result = applyRemark(vault, name, rest.slice(1).join(" "));
+      if (!result.ok) {
+        ctx.ui.notify(result.reason, "warning");
+        return;
+      }
+      ctx.ui.notify(result.remark ? `sec:${name} remark: ${result.remark}` : `sec:${name} remark cleared`, "info");
       return;
     }
 
@@ -234,7 +245,7 @@ export function formatSecretList(entries: readonly PublicEntry[]): string {
   return entries
     .map(
       (e) =>
-        `sec:${e.name} · ${labelOf(e)} · len ${e.length} · ${e.source} · added ${new Date(e.addedAt).toISOString()}`,
+        `sec:${e.name} · ${labelOf(e)} · len ${e.length} · ${e.source} · added ${new Date(e.addedAt).toISOString()}${e.remark ? ` · remark: ${e.remark}` : ""}`,
     )
     .join("\n");
 }
@@ -294,11 +305,13 @@ async function entryMenuLoop(
   name: string,
 ): Promise<void> {
   for (;;) {
+    const current = vault.get(name)?.remark;
     const choice = await selectList(ctx, `sec:${name}`, entryRows(name), {
       c: { kind: "copy", name },
+      m: { kind: "remark", name },
       r: { kind: "rename", name },
       d: { kind: "remove", name },
-    });
+    }, current ? `remark: ${current}` : "no remark");
     if (!choice || choice.kind === "back") return;
     if (!vault.has(name)) {
       // The entry can disappear while this menu is open — `/sec off` clears the vault from the
@@ -307,6 +320,12 @@ async function entryMenuLoop(
     }
     if (choice.kind === "copy") {
       await runSecCommand(`restore ${name}`, vault, ctx);
+      continue;
+    }
+    if (choice.kind === "remark") {
+      const next = await ctx.ui.input(`Remark for sec:${name} — empty clears it`, current ?? "scenario · URL · username");
+      if (next === undefined) continue;
+      await runSecCommand(`remark ${name} ${next}`, vault, ctx);
       continue;
     }
     if (choice.kind === "rename") {

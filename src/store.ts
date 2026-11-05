@@ -10,6 +10,8 @@ import { join } from "node:path";
  *   <agentDir>/pi-secret-vault/vault.json   { version: 1, records: { name: Record } }
  *   AES-256-GCM per record, AAD `pi-secret-vault:v1:<name>`: a record copied onto another name
  *   fails to decrypt. Names and metadata are plaintext, because listing must not need the key.
+ *   `remark` is optional plaintext metadata, added without a version bump because a reader that
+ *   does not know it loses nothing: bumping would make older readers refuse the whole vault.
  *
  * The master key lives in the macOS Keychain (service `pi-secret-vault`, account = first 16 hex
  * of sha256(vault dir), so dev and production never share one). Elsewhere it is a 0600 key file
@@ -29,6 +31,7 @@ export interface StoredRecord {
   addedAt: number;
   source: StoredSource;
   length: number;
+  remark?: string;
 }
 
 interface VaultFile {
@@ -116,16 +119,16 @@ export class SecretStore {
   }
 
   list(): Array<{ name: string } & Omit<StoredRecord, "iv" | "tag" | "ct">> {
-    return Object.entries(this.#read().records).map(([name, r]) => ({ name, addedAt: r.addedAt, source: r.source, length: r.length }));
+    return Object.entries(this.#read().records).map(([name, r]) => ({ name, addedAt: r.addedAt, source: r.source, length: r.length, ...(r.remark ? { remark: r.remark } : {}) }));
   }
 
   /** Every value that decrypts, plus the names that did not. One bad record costs only itself. */
-  loadAll(): { values: Array<{ name: string; value: string; source: StoredSource; addedAt: number }>; failed: string[] } {
+  loadAll(): { values: Array<{ name: string; value: string; source: StoredSource; addedAt: number; remark?: string }>; failed: string[] } {
     const file = this.#read();
     const names = Object.keys(file.records);
     if (!names.length) return { values: [], failed: [] };
     const key = this.#existingKey();
-    const values: Array<{ name: string; value: string; source: StoredSource; addedAt: number }> = [];
+    const values: Array<{ name: string; value: string; source: StoredSource; addedAt: number; remark?: string }> = [];
     const failed: string[] = [];
     for (const name of names) {
       const r = file.records[name]!;
@@ -134,7 +137,7 @@ export class SecretStore {
         d.setAAD(aad(name));
         d.setAuthTag(Buffer.from(r.tag, "base64"));
         const value = Buffer.concat([d.update(Buffer.from(r.ct, "base64")), d.final()]).toString("utf8");
-        values.push({ name, value, source: r.source, addedAt: r.addedAt });
+        values.push({ name, value, source: r.source, addedAt: r.addedAt, ...(r.remark ? { remark: r.remark } : {}) });
       } catch {
         failed.push(name);
       }
@@ -142,11 +145,12 @@ export class SecretStore {
     return { values, failed };
   }
 
-  put(name: string, value: string, source: StoredSource): void {
+  /** An undefined remark keeps the record's existing one: replacing a value is not forgetting what it is for. */
+  put(name: string, value: string, source: StoredSource, remark?: string): void {
     this.#locked(() => {
       const file = this.#read();
       const key = this.#writeKey(file);
-      file.records[name] = this.#seal(key, name, value, source, Date.now());
+      file.records[name] = this.#seal(key, name, value, source, Date.now(), remark ?? file.records[name]?.remark);
       this.#write(file);
     });
   }
@@ -172,19 +176,32 @@ export class SecretStore {
       d.setAAD(aad(from));
       d.setAuthTag(Buffer.from(old.tag, "base64"));
       const value = Buffer.concat([d.update(Buffer.from(old.ct, "base64")), d.final()]).toString("utf8");
-      file.records[to] = this.#seal(key, to, value, old.source, old.addedAt);
+      file.records[to] = this.#seal(key, to, value, old.source, old.addedAt, old.remark);
       delete file.records[from];
       this.#write(file);
       return true;
     });
   }
 
-  #seal(key: Buffer, name: string, value: string, source: StoredSource, addedAt: number): StoredRecord {
+  /** Metadata only, so it needs no key. An undefined remark clears it. */
+  setRemark(name: string, remark: string | undefined): boolean {
+    return this.#locked(() => {
+      const file = this.#read();
+      const record = file.records[name];
+      if (!record) return false;
+      if (remark) record.remark = remark;
+      else delete record.remark;
+      this.#write(file);
+      return true;
+    });
+  }
+
+  #seal(key: Buffer, name: string, value: string, source: StoredSource, addedAt: number, remark?: string): StoredRecord {
     const iv = randomBytes(12);
     const c = createCipheriv("aes-256-gcm", key, iv);
     c.setAAD(aad(name));
     const ct = Buffer.concat([c.update(value, "utf8"), c.final()]);
-    return { iv: iv.toString("base64"), tag: c.getAuthTag().toString("base64"), ct: ct.toString("base64"), addedAt, source, length: value.length };
+    return { iv: iv.toString("base64"), tag: c.getAuthTag().toString("base64"), ct: ct.toString("base64"), addedAt, source, length: value.length, ...(remark ? { remark } : {}) };
   }
 
   #read(): VaultFile {

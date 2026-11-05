@@ -34,6 +34,8 @@ export interface VaultEntry {
    * back into the file it came from puts nothing on disk that was not already there.
    */
   origins?: readonly string[];
+  /** What the credential is for (scenario, URL, username). Sent to the model, so never value-derived. */
+  remark?: string;
 }
 
 /** Debug-safe projection: hasOwnProperty("value") must be false. */
@@ -45,6 +47,7 @@ export interface PublicEntry {
   addedAt: number;
   tier: SecretTier;
   source: SecretSource;
+  remark?: string;
 }
 
 interface InternalEntry extends Omit<VaultEntry, keyof PublicEntry> {
@@ -60,6 +63,7 @@ function toPublic(entry: VaultEntry): PublicEntry {
     addedAt: entry.addedAt,
     tier: entry.tier,
     source: entry.source,
+    ...(entry.remark ? { remark: entry.remark } : {}),
   };
 }
 
@@ -79,7 +83,8 @@ export class Vault {
     this.#toVar = toVar;
   }
 
-  add(name: string, value: string, source: SecretSource, tier: SecretTier = "session"): PublicEntry {
+  /** An undefined remark keeps the one already under this name. */
+  add(name: string, value: string, source: SecretSource, tier: SecretTier = "session", remark?: string): PublicEntry {
     if (!isValidName(name)) throw new Error(`invalid secret name: ${JSON.stringify(name)}`);
     // Two names must never share a shell variable, or a command asking for one
     // silently receives the other. Enforced at both name-entry points, add() and
@@ -90,6 +95,7 @@ export class Vault {
     if (Buffer.byteLength(value, "utf8") > MAX_REF_BYTES) {
       throw new Error(`secret ${name} is too large (>1MiB) — this looks like a file, not a token`);
     }
+    const nextRemark = remark ?? this.#map.get(name)?.remark;
     const entry: VaultEntry = {
       name,
       value,
@@ -99,6 +105,7 @@ export class Vault {
       length: value.length,
       fingerprint: fingerprint(value),
       preview: maskPreview(value),
+      ...(nextRemark ? { remark: nextRemark } : {}),
     };
     this.#map.set(name, entry);
     // Projection, never the value-bearing entry: a failing toMatchObject on the
@@ -133,6 +140,13 @@ export class Vault {
   }
   remove(name: string): boolean {
     return this.#map.delete(name);
+  }
+  setRemark(name: string, remark: string | undefined): boolean {
+    const entry = this.#map.get(name);
+    if (!entry) return false;
+    const { remark: _old, ...rest } = entry;
+    this.#map.set(name, remark ? { ...rest, remark } : rest);
+    return true;
   }
   rename(oldName: string, newName: string): boolean {
     const entry = this.#map.get(oldName);

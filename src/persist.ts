@@ -3,6 +3,7 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { SecretStore, type StoredSource } from "./store.ts";
 import { MIN_SCRUBABLE_LENGTH } from "./refs.ts";
 import { isEnabled } from "./state.ts";
+import { validateRemark } from "./remark.ts";
 import type { SecretSource, Vault } from "./vault.ts";
 
 let store: SecretStore | undefined;
@@ -34,11 +35,16 @@ export function syncVault(vault: Vault, target: SecretStore = getStore()): strin
     for (const entry of vault.entries()) {
       if (entry.tier === "ambient" && !present.has(entry.name)) vault.remove(entry.name);
     }
-    for (const { name, value, source } of values) {
+    for (const { name, value, source, remark } of values) {
       const current = vault.get(name);
       if (current && current.tier === "session") continue;
-      if (current?.value === value) continue;
+      if (current?.value === value) {
+        // Without this a remark edited elsewhere would never reach a running session.
+        if (current.remark !== remark) vault.setRemark(name, remark);
+        continue;
+      }
       vault.add(name, value, source === "web" ? "prompt" : source, "ambient");
+      vault.setRemark(name, remark);
     }
     seen.set(vault, signature);
     return failed.length ? `pi-secret: could not decrypt ${failed.join(", ")}` : undefined;
@@ -51,17 +57,17 @@ export function syncVault(vault: Vault, target: SecretStore = getStore()): strin
  * Store a value the user deliberately gave. On failure it still works for this session, and the
  * returned text says so: losing the persistence must not lose the value they just typed.
  */
-export function saveSecret(vault: Vault, name: string, value: string, source: SecretSource, target: SecretStore = getStore()): { persisted: boolean; note: string } {
+export function saveSecret(vault: Vault, name: string, value: string, source: SecretSource, target: SecretStore = getStore(), remark?: string): { persisted: boolean; note: string } {
   const short = value.length < MIN_SCRUBABLE_LENGTH
     ? ` · shorter than ${MIN_SCRUBABLE_LENGTH} characters, so it will NOT be hidden in output`
     : "";
   try {
-    target.put(name, value, source as StoredSource);
-    vault.add(name, value, source, "ambient");
+    target.put(name, value, source as StoredSource, remark);
+    vault.add(name, value, source, "ambient", remark);
     seen.delete(vault);
     return { persisted: true, note: `saved encrypted, available in every session${short}` };
   } catch (error) {
-    vault.add(name, value, source);
+    vault.add(name, value, source, "session", remark);
     return { persisted: false, note: `this session only (${error instanceof Error ? error.message : String(error)})${short}` };
   }
 }
@@ -71,4 +77,30 @@ export function forgetStored(name: string, target: SecretStore = getStore()): vo
 }
 export function renameStored(from: string, to: string, target: SecretStore = getStore()): void {
   target.rename(from, to);
+}
+
+export type RemarkOutcome =
+  | { ok: true; remark: string | undefined; previous: string | undefined; persisted: boolean }
+  | { ok: false; reason: string };
+
+/**
+ * The one write path for a remark, shared by `sec_remark` and `/sec remark`. A saved secret is
+ * written to the file first, so a storage failure leaves memory and disk agreeing.
+ */
+export function applyRemark(vault: Vault, name: string, raw: string, target: SecretStore = getStore()): RemarkOutcome {
+  const entry = vault.get(name);
+  if (!entry) return { ok: false, reason: `sec:${name} not found` };
+  const checked = validateRemark(raw, vault);
+  if (!checked.ok) return checked;
+  const persisted = entry.tier === "ambient";
+  if (persisted) {
+    try {
+      if (!target.setRemark(name, checked.remark)) return { ok: false, reason: `sec:${name} is no longer in the vault file` };
+    } catch (error) {
+      return { ok: false, reason: `could not save the remark: ${error instanceof Error ? error.message : String(error)}` };
+    }
+    seen.delete(vault);
+  }
+  vault.setRemark(name, checked.remark);
+  return { ok: true, remark: checked.remark, previous: entry.remark, persisted };
 }

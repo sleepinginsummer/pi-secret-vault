@@ -26,6 +26,7 @@ export type SecAction =
   | { kind: "add-file" }
   | { kind: "toggle" }
   | { kind: "copy"; name: string }
+  | { kind: "remark"; name: string }
   | { kind: "rename"; name: string }
   | { kind: "remove"; name: string }
   | { kind: "back" };
@@ -119,6 +120,7 @@ export function secretRows(
 export function entryRows(name: string): Row[] {
   return [
     { action: { kind: "copy", name }, label: "Copy value to clipboard", detail: "c" },
+    { action: { kind: "remark", name }, label: "Edit remark…", detail: "m" },
     { action: { kind: "rename", name }, label: "Rename…", detail: "r" },
     { action: { kind: "remove", name }, label: "Remove", detail: "d", separatorBefore: true },
     { action: { kind: "back" }, label: "Back", detail: "esc" },
